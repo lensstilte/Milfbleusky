@@ -12,6 +12,8 @@ LIST_URL = "https://bsky.app/profile/did:plc:mbmrdjswath6qc3sdpal5vqh/lists/3mfz
 
 MAX_PER_RUN = 100
 MAX_PER_USER = 3
+HOURS_BACK = 3
+
 AUTHOR_POSTS_PER_MEMBER = 30
 LIST_MEMBER_LIMIT = 1500
 SLEEP_SECONDS = 2
@@ -28,8 +30,20 @@ def now_iso():
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {"reposted": {}, "liked": {}}
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            return {"reposted": {}, "liked": {}}
+
+        data.setdefault("reposted", {})
+        data.setdefault("liked", {})
+        return data
+
+    except Exception:
+        return {"reposted": {}, "liked": {}}
 
 
 def save_state(state):
@@ -41,6 +55,7 @@ def parse_list_uri(url):
     m = LIST_RE.search(url)
     if not m:
         raise ValueError("Ongeldige Bluesky lijst-link")
+
     did_or_handle, rkey = m.group(1), m.group(2)
     return f"at://{did_or_handle}/app.bsky.graph.list/{rkey}"
 
@@ -58,10 +73,12 @@ def get_list_members(client, list_uri):
 
         for item in resp.items:
             members.append(item.subject.did)
+
             if len(members) >= LIST_MEMBER_LIMIT:
                 break
 
         cursor = resp.cursor
+
         if not cursor:
             break
 
@@ -70,22 +87,28 @@ def get_list_members(client, list_uri):
 
 def has_media(post):
     embed = getattr(post, "embed", None)
+
     if not embed:
         return False
 
-    t = getattr(embed, "py_type", "") or ""
+    py_type = getattr(embed, "py_type", "") or ""
+    py_type = py_type.lower()
 
-    if "images" in t.lower():
+    if "images" in py_type:
         return True
-    if "video" in t.lower():
+
+    if "video" in py_type:
         return True
-    if "recordWithMedia" in t:
+
+    if "recordwithmedia" in py_type:
         return True
 
     if hasattr(embed, "images"):
         return True
+
     if hasattr(embed, "playlist"):
         return True
+
     if hasattr(embed, "media"):
         return True
 
@@ -99,6 +122,25 @@ def post_created_at(post):
         return ""
 
 
+def is_within_hours(created, hours):
+    if not created:
+        return False
+
+    try:
+        created_dt = datetime.fromisoformat(
+            created.replace("Z", "+00:00")
+        )
+
+        age_hours = (
+            datetime.now(timezone.utc) - created_dt
+        ).total_seconds() / 3600
+
+        return age_hours <= hours
+
+    except Exception:
+        return False
+
+
 def main():
     username = os.getenv("BSKY_USERNAME")
     password = os.getenv("BSKY_PASSWORD")
@@ -107,8 +149,6 @@ def main():
         raise RuntimeError("BSKY_USERNAME of BSKY_PASSWORD ontbreekt")
 
     state = load_state()
-    state.setdefault("reposted", {})
-    state.setdefault("liked", {})
 
     client = Client()
     client.login(username, password)
@@ -136,6 +176,7 @@ def main():
                 uri = post.uri
                 cid = post.cid
                 author_did = post.author.did
+                created = post_created_at(post)
 
                 if uri in state["reposted"]:
                     continue
@@ -143,11 +184,14 @@ def main():
                 if not has_media(post):
                     continue
 
+                if not is_within_hours(created, HOURS_BACK):
+                    continue
+
                 candidates.append({
                     "uri": uri,
                     "cid": cid,
                     "author": author_did,
-                    "created_at": post_created_at(post)
+                    "created_at": created
                 })
 
         except Exception as e:
@@ -155,7 +199,7 @@ def main():
 
     candidates.sort(key=lambda x: x["created_at"])
 
-    print(f"Mediapost kandidaten: {len(candidates)}")
+    print(f"Mediapost kandidaten laatste {HOURS_BACK} uur: {len(candidates)}")
 
     done = 0
 
@@ -173,6 +217,7 @@ def main():
 
         try:
             client.repost(uri, cid)
+
             state["reposted"][uri] = {
                 "cid": cid,
                 "author": author,
@@ -185,11 +230,14 @@ def main():
 
             try:
                 client.like(uri, cid)
+
                 state["liked"][uri] = {
                     "cid": cid,
                     "time": now_iso()
                 }
+
                 print(f"Liked: {uri}")
+
             except Exception as e:
                 print(f"Like skip/fout: {e}")
 
@@ -203,6 +251,7 @@ def main():
             print(f"Repost fout/skip: {e}")
 
     save_state(state)
+
     print(f"Klaar. Totaal gerepost: {done}")
 
 
