@@ -14,7 +14,9 @@ MAX_PER_RUN = 100
 MAX_PER_USER = 3
 HOURS_BACK = 3
 
-AUTHOR_POSTS_PER_MEMBER = 30
+# kijkt 50 posts terug per account
+AUTHOR_POSTS_PER_MEMBER = 50
+
 LIST_MEMBER_LIMIT = 1500
 SLEEP_SECONDS = 2
 
@@ -29,21 +31,31 @@ def now_iso():
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"reposted": {}, "liked": {}}
+        return {
+            "reposted": {},
+            "liked": {}
+        }
 
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         if not isinstance(data, dict):
-            return {"reposted": {}, "liked": {}}
+            return {
+                "reposted": {},
+                "liked": {}
+            }
 
         data.setdefault("reposted", {})
         data.setdefault("liked", {})
+
         return data
 
     except Exception:
-        return {"reposted": {}, "liked": {}}
+        return {
+            "reposted": {},
+            "liked": {}
+        }
 
 
 def save_state(state):
@@ -53,10 +65,12 @@ def save_state(state):
 
 def parse_list_uri(url):
     m = LIST_RE.search(url)
+
     if not m:
-        raise ValueError("Ongeldige Bluesky lijst-link")
+        raise ValueError("Ongeldige lijst URL")
 
     did_or_handle, rkey = m.group(1), m.group(2)
+
     return f"at://{did_or_handle}/app.bsky.graph.list/{rkey}"
 
 
@@ -146,7 +160,9 @@ def main():
     password = os.getenv("BSKY_PASSWORD")
 
     if not username or not password:
-        raise RuntimeError("BSKY_USERNAME of BSKY_PASSWORD ontbreekt")
+        raise RuntimeError(
+            "BSKY_USERNAME of BSKY_PASSWORD ontbreekt"
+        )
 
     state = load_state()
 
@@ -156,6 +172,7 @@ def main():
     print("Login OK")
 
     list_uri = parse_list_uri(LIST_URL)
+
     members = get_list_members(client, list_uri)
 
     print(f"Lijstleden gevonden: {len(members)}")
@@ -168,23 +185,37 @@ def main():
             feed = client.app.bsky.feed.get_author_feed({
                 "actor": did,
                 "limit": AUTHOR_POSTS_PER_MEMBER,
-                "filter": "posts_and_author_threads"
+                "filter": "posts_with_replies"
             })
 
             for item in feed.feed:
                 post = item.post
+
                 uri = post.uri
                 cid = post.cid
+
                 author_did = post.author.did
+
                 created = post_created_at(post)
 
+                # Alleen eigen posts van het account
+                # Geen reposts van anderen
+                if author_did != did:
+                    continue
+
+                # Al eerder gerepost
                 if uri in state["reposted"]:
                     continue
 
+                # Alleen mediaposts
                 if not has_media(post):
                     continue
 
-                if not is_within_hours(created, HOURS_BACK):
+                # Alleen laatste X uur
+                if not is_within_hours(
+                    created,
+                    HOURS_BACK
+                ):
                     continue
 
                 candidates.append({
@@ -197,9 +228,16 @@ def main():
         except Exception as e:
             print(f"Skip member {did}: {e}")
 
-    candidates.sort(key=lambda x: x["created_at"])
+    # oudste eerst
+    candidates.sort(
+        key=lambda x: x["created_at"]
+    )
 
-    print(f"Mediapost kandidaten laatste {HOURS_BACK} uur: {len(candidates)}")
+    print(
+        f"Mediapost kandidaten "
+        f"laatste {HOURS_BACK} uur: "
+        f"{len(candidates)}"
+    )
 
     done = 0
 
@@ -239,20 +277,21 @@ def main():
                 print(f"Liked: {uri}")
 
             except Exception as e:
-                print(f"Like skip/fout: {e}")
+                print(f"Like fout: {e}")
 
             per_user_seen[author] += 1
             done += 1
 
             save_state(state)
+
             time.sleep(SLEEP_SECONDS)
 
         except Exception as e:
-            print(f"Repost fout/skip: {e}")
+            print(f"Repost fout: {e}")
 
     save_state(state)
 
-    print(f"Klaar. Totaal gerepost: {done}")
+    print(f"Klaar. Gerepost: {done}")
 
 
 if __name__ == "__main__":
